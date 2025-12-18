@@ -72,6 +72,7 @@
 
    ```bash
    poetry run python test.py
+   poetry run python test_common_errors.py
    ```
 
 ## Дополнительные требования, выполненные в приложении:

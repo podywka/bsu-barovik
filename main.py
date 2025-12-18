@@ -4,6 +4,7 @@ from decimal import Decimal, InvalidOperation, getcontext, ROUND_HALF_UP, ROUND_
 from typing import Final, Callable
 from dataclasses import dataclass
 from enum import Enum
+import re
 
 # Высокая точность для предотвращения потерь до квантования
 getcontext().prec = 60
@@ -98,6 +99,10 @@ class FinancialApp:
         self.root.title("Финансовый калькулятор - Шаг 3")
         self.root.resizable(False, False)
         
+        # Привязка горячих клавиш для вставки
+        self.root.bind('<Control-v>', lambda e: self._handle_paste())
+        self.root.bind('<Control-V>', lambda e: self._handle_paste())
+        
         self._init_vars()
         self._setup_ui()
 
@@ -114,7 +119,7 @@ class FinancialApp:
 
         # Заголовок (Инфо)
         info_text = "Чепиков Арсений Алексеевич | 4 Курс | Группа 4 | 2025"
-        ttk.Label(main_frame, text=info_text, font=("Arial", 9, "italic")).grid(row=0, column=0, columnspan=5, pady=(0, 20))
+        ttk.Label(main_frame, text=info_text, font=("Arial", 9, "italic")).grid(row=0, column=0, columnspan=9, pady=(0, 20))
 
         # Операнды и операции
         ops_symbols = ["+", "-", "*", "/"]
@@ -155,9 +160,10 @@ class FinancialApp:
         ttk.Label(res_container, textvariable=self.rounded_result_var, font=("Courier", 14, "bold"), foreground="navy").grid(row=1, column=1, sticky="W")
 
     def _add_operand(self, parent, col, row) -> ttk.Entry:
-        entry = ttk.Entry(parent, width=12, justify="center")
+        entry = ttk.Entry(parent, width=15, justify="center")
         entry.insert(0, "0")
         entry.grid(row=row, column=col, padx=2)
+        entry.bind('<KeyRelease>', lambda e: self._validate_entry(e.widget))
         self.num_entries.append(entry)
         return entry
 
@@ -168,19 +174,87 @@ class FinancialApp:
         self.op_vars.append(var)
         return combo
 
+    def _validate_entry(self, widget):
+        """Валидация ввода в реальном времени."""
+        text = widget.get()
+        if not text:
+            return
+        
+        # Проверка на допустимые символы
+        if not re.match(r'^[-+]?[\d\s]*[.,]?\d*$', text):
+            widget.delete(0, tk.END)
+            widget.insert(0, text[:-1])
+            return
+        
+        # Автоматическая замена запятой на точку
+        if ',' in text:
+            text = text.replace(',', '.')
+            widget.delete(0, tk.END)
+            widget.insert(0, text)
+
     def _validate_and_parse(self, val_str: str) -> Decimal:
-        """Парсинг числа с поддержкой формата из Шага 2."""
-        clean = val_str.strip().replace(",", ".").replace(" ", "")
-        if not clean: raise CalculatorError("Пустое поле ввода")
-        if "e" in clean.lower(): raise CalculatorError("Экспоненциальная форма запрещена")
-        return Decimal(clean)
+        """Парсинг числа с поддержкой различных форматов."""
+        if not val_str:
+            return Decimal("0")
+        
+        # Убираем все пробелы (включая неразрывные)
+        clean = re.sub(r'\s+', '', val_str.strip())
+        
+        if not clean:
+            raise CalculatorError("Пустое поле ввода")
+        
+        # Проверяем, что строка похожа на число
+        if not re.match(r'^[-+]?\d*([.,]\d*)?$', clean):
+            raise CalculatorError(f"Некорректный формат числа: '{val_str}'")
+        
+        # Заменяем запятую на точку
+        clean = clean.replace(',', '.')
+        
+        # Проверка на экспоненциальную форму
+        if 'e' in clean.lower():
+            raise CalculatorError("Экспоненциальная форма запрещена")
+        
+        # Проверка на несколько разделителей
+        if clean.count('.') > 1:
+            raise CalculatorError("Слишком много разделителей в числе")
+        
+        # Проверка на отрицательное число
+        if clean.startswith('-'):
+            # Допускаем отрицательные числа
+            pass
+        
+        try:
+            return Decimal(clean)
+        except InvalidOperation:
+            raise CalculatorError(f"Невозможно преобразовать '{val_str}' в число")
+
+    def _handle_paste(self):
+        """Обработка вставки из буфера обмена с поддержкой запятых."""
+        try:
+            clipboard = self.root.clipboard_get()
+            if clipboard:
+                # Заменяем запятую на точку для корректного парсинга
+                clipboard = clipboard.replace(',', '.')
+                # Убираем все пробелы
+                clipboard = re.sub(r'\s+', '', clipboard)
+                
+                # Вставляем в активное поле
+                widget = self.root.focus_get()
+                if isinstance(widget, ttk.Entry) and widget in self.num_entries:
+                    widget.delete(0, tk.END)
+                    widget.insert(0, clipboard)
+        except:
+            pass
 
     def _on_params_change(self):
         """Пересчитывает округление, если результат уже есть."""
         raw_val = self.raw_result_var.get()
         if raw_val != "-":
-            mode = RoundingMode(self.rounding_var.get())
-            self.rounded_result_var.set(self.engine.format_final(Decimal(raw_val), mode))
+            try:
+                mode = RoundingMode(self.rounding_var.get())
+                self.rounded_result_var.set(self.engine.format_final(Decimal(raw_val), mode))
+            except:
+                pass
 
     def _calculate(self):
         try:
@@ -192,7 +266,11 @@ class FinancialApp:
             result = self.engine.evaluate(state)
             
             # Сохраняем точный результат (для отображения и последующего переокругления)
-            self.raw_result_var.set(f"{result:f}".rstrip('0').rstrip('.'))
+            result_str = f"{result:f}"
+            # Убираем лишние нули, но оставляем точку если это целое число
+            if '.' in result_str:
+                result_str = result_str.rstrip('0').rstrip('.')
+            self.raw_result_var.set(result_str)
             self.rounded_result_var.set(self.engine.format_final(result, mode))
 
         except CalculatorError as e:

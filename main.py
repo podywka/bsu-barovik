@@ -1,154 +1,211 @@
 import tkinter as tk
-from tkinter import messagebox
-from decimal import Decimal, InvalidOperation, getcontext, ROUND_HALF_UP
-import re
+from tkinter import messagebox, ttk
+from decimal import Decimal, InvalidOperation, getcontext, ROUND_HALF_UP, ROUND_HALF_EVEN, ROUND_DOWN
+from typing import Final, Callable
+from dataclasses import dataclass
+from enum import Enum
 
-# Устанавливаем высокую точность для промежуточных вычислений
-getcontext().prec = 50
+# Высокая точность для предотвращения потерь до квантования
+getcontext().prec = 60
 
-class FinancialCalculator:
-    """Финансовый калькулятор с поддержкой группировки разрядов и фикс. запятой."""
-    
-    LIMIT = Decimal("1000000000000.000000")
+class RoundingMode(Enum):
+    MATH = "Математическое"
+    BANKERS = "Бухгалтерское (банковское)"
+    TRUNCATE = "Усечение"
 
-    def __init__(self, master: tk.Tk):
-        self.master = master
-        self.master.title("Финансовый калькулятор - Шаг 2")
+class CalculatorError(Exception):
+    """Исключение для бизнес-логики калькулятора."""
+    pass
 
-        # Интерфейс: Инфо
-        tk.Label(
-            master, 
-            text="ФИО: Чепиков Арсений Алексеевич\nКурс: 3\nГруппа: 4\nГод: 2025",
-            justify="center"
-        ).grid(row=0, column=0, columnspan=4, padx=10, pady=10)
+@dataclass(frozen=True)
+class CalculationState:
+    """Контейнер для входных данных вычисления."""
+    nums: list[Decimal]
+    ops: list[str]
+    rounding_mode: RoundingMode
 
-        # Ввод чисел
-        self.num1_entry = self._create_input_field("Число 1:", 1)
-        self.num2_entry = self._create_input_field("Число 2:", 2)
+class CalculatorEngine:
+    """Ядро расчетов с фиксированной запятой и специфическим приоритетом."""
 
-        # Выбор операции
-        tk.Label(master, text="Операция:").grid(row=3, column=0, sticky="e", padx=10)
-        self.operation_var = tk.StringVar(value="add")
+    LIMIT: Final[Decimal] = Decimal("1000000000000")
+    INTERMEDIATE_PREC: Final[Decimal] = Decimal("1.0000000000") # 10 знаков
+
+    def _apply_op(self, left: Decimal, op: str, right: Decimal) -> Decimal:
+        """Выполняет одну операцию и применяет промежуточное округление."""
+        try:
+            if op == "+": res = left + right
+            elif op == "-": res = left - right
+            elif op == "*": res = left * right
+            elif op == "/":
+                if right == 0: raise CalculatorError("Деление на ноль")
+                res = left / right
+            else: raise CalculatorError(f"Неизвестная операция: {op}")
+            
+            # Промежуточное округление до 10 знаков
+            res = res.quantize(self.INTERMEDIATE_PREC, rounding=ROUND_HALF_UP)
+            
+            if abs(res) > self.LIMIT:
+                raise CalculatorError("Переполнение при промежуточном вычислении")
+            
+            return res
+        except InvalidOperation:
+            raise CalculatorError("Ошибка точности данных")
+
+    def evaluate(self, state: CalculationState) -> Decimal:
+        """
+        Вычисляет выражение по схеме: N1 op1 (N2 op2 N3) op3 N4.
+        Сначала вычисляется блок (N2 op2 N3), затем остальное по правилам приоритета математики.
+        """
+        n1, n2, n3, n4 = state.nums
+        op1, op2, op3 = state.ops
+
+        # 1. Приоритетный блок (N2 op2 N3)
+        mid_block = self._apply_op(n2, op2, n3)
+
+        # 2. Теперь имеем выражение: n1 op1 mid_block op3 n4
+        # Проверяем математический приоритет (* / выше чем + -)
+        op1_high = op1 in ("*", "/")
+        op3_high = op3 in ("*", "/")
+
+        if op3_high and not op1_high:
+            # Схема: n1 op1 (mid_block op3 n4)
+            right_part = self._apply_op(mid_block, op3, n4)
+            return self._apply_op(n1, op1, right_part)
+        else:
+            # Схема: (n1 op1 mid_block) op3 n4 (стандартно слева направо или op1 приоритетнее)
+            left_part = self._apply_op(n1, op1, mid_block)
+            return self._apply_op(left_part, op3, n4)
+
+    @staticmethod
+    def format_final(val: Decimal, mode: RoundingMode) -> str:
+        """Округляет результат до целых согласно выбранному методу."""
+        target = Decimal("1")
+        if mode == RoundingMode.MATH:
+            return str(val.quantize(target, rounding=ROUND_HALF_UP))
+        elif mode == RoundingMode.BANKERS:
+            return str(val.quantize(target, rounding=ROUND_HALF_EVEN))
+        elif mode == RoundingMode.TRUNCATE:
+            # Усечение: всегда к нулю
+            return str(val.quantize(target, rounding=ROUND_DOWN))
+        return str(val)
+
+class FinancialApp:
+    """GUI приложения в строгом стиле."""
+
+    def __init__(self, root: tk.Tk):
+        self.root = root
+        self.engine = CalculatorEngine()
+        self.root.title("Финансовый калькулятор - Шаг 3")
+        self.root.resizable(False, False)
         
-        operations = [
-            ("Сложение", "add", 3, 1),
-            ("Вычитание", "subtract", 3, 2),
-            ("Умножение", "multiply", 4, 1),
-            ("Деление", "divide", 4, 2)
-        ]
+        self._init_vars()
+        self._setup_ui()
 
-        for text, mode, row, col in operations:
-            tk.Radiobutton(master, text=text, variable=self.operation_var, value=mode).grid(row=row, column=col, sticky="w")
+    def _init_vars(self):
+        self.num_entries = []
+        self.op_vars = []
+        self.rounding_var = tk.StringVar(value=RoundingMode.MATH.value)
+        self.raw_result_var = tk.StringVar(value="-")
+        self.rounded_result_var = tk.StringVar(value="-")
+
+    def _setup_ui(self):
+        main_frame = ttk.Frame(self.root, padding="20")
+        main_frame.grid(row=0, column=0, sticky="NSEW")
+
+        # Заголовок (Инфо)
+        info_text = "Чепиков Арсений Алексеевич | 4 Курс | Группа 4 | 2025"
+        ttk.Label(main_frame, text=info_text, font=("Arial", 9, "italic")).grid(row=0, column=0, columnspan=5, pady=(0, 20))
+
+        # Операнды и операции
+        ops_symbols = ["+", "-", "*", "/"]
+        
+        # Строка 1: N1 op1 (
+        self.n1_entry = self._add_operand(main_frame, 0, 1)
+        self.op1_menu = self._add_operator(main_frame, 1, 1, ops_symbols)
+        ttk.Label(main_frame, text=" ( ", font=("Arial", 14, "bold")).grid(row=1, column=2)
+
+        # Строка 2: N2 op2 N3 )
+        self.n2_entry = self._add_operand(main_frame, 3, 1)
+        self.op2_menu = self._add_operator(main_frame, 4, 1, ops_symbols)
+        self.n3_entry = self._add_operand(main_frame, 5, 1)
+        ttk.Label(main_frame, text=" ) ", font=("Arial", 14, "bold")).grid(row=1, column=6)
+
+        # Строка 3: op3 N4
+        self.op3_menu = self._add_operator(main_frame, 7, 1, ops_symbols)
+        self.n4_entry = self._add_operand(main_frame, 8, 1)
+
+        # Блок управления округлением
+        round_frame = ttk.LabelFrame(main_frame, text=" Вид округления итогового результата ", padding=10)
+        round_frame.grid(row=2, column=0, columnspan=9, pady=20, sticky="WE")
+        
+        for i, mode in enumerate(RoundingMode):
+            ttk.Radiobutton(round_frame, text=mode.value, variable=self.rounding_var, value=mode.value, command=self._on_params_change).grid(row=0, column=i, padx=10)
 
         # Кнопка расчета
-        tk.Button(master, text="Вычислить", command=self.calculate, width=20).grid(row=5, column=0, columnspan=4, pady=20)
+        ttk.Button(main_frame, text="ВЫЧИСЛИТЬ", command=self._calculate).grid(row=3, column=0, columnspan=9, pady=10, sticky="WE")
 
-        # Результат
-        self.result_var = tk.StringVar(value="Результат: ")
-        tk.Label(master, textvariable=self.result_var, font=("Courier", 10, "bold")).grid(row=6, column=0, columnspan=4, pady=10)
+        # Результаты
+        res_container = ttk.Frame(main_frame)
+        res_container.grid(row=4, column=0, columnspan=9, pady=10)
 
-    def _create_input_field(self, label_text: str, row: int) -> tk.Entry:
-        tk.Label(self.master, text=label_text).grid(row=row, column=0, sticky="e", padx=10, pady=5)
-        entry = tk.Entry(self.master, width=40)
-        entry.grid(row=row, column=1, columnspan=3, padx=10, pady=5)
+        ttk.Label(res_container, text="Точный результат:").grid(row=0, column=0, sticky="E", padx=5)
+        ttk.Label(res_container, textvariable=self.raw_result_var, font=("Courier", 11, "bold")).grid(row=0, column=1, sticky="W")
+
+        ttk.Label(res_container, text="Округленный (целый):").grid(row=1, column=0, sticky="E", padx=5)
+        ttk.Label(res_container, textvariable=self.rounded_result_var, font=("Courier", 14, "bold"), foreground="navy").grid(row=1, column=1, sticky="W")
+
+    def _add_operand(self, parent, col, row) -> ttk.Entry:
+        entry = ttk.Entry(parent, width=12, justify="center")
+        entry.insert(0, "0")
+        entry.grid(row=row, column=col, padx=2)
+        self.num_entries.append(entry)
         return entry
 
-    def validate_input(self, raw_value: str) -> Decimal:
-        """
-        Проверяет ввод пользователя.
-        Поддерживает: пробелы как разделители тысяч, точку/запятую.
-        Запрещает: экспоненциальную нотацию, некорректные пробелы, буквы, знаки внутри числа.
-        """
-        val = raw_value.strip().replace(",", ".")
-        
-        if not val:
-            raise ValueError("Поле не может быть пустым.")
-        
-        if 'e' in val.lower():
-            raise ValueError("Экспоненциальная нотация запрещена.")
+    def _add_operator(self, parent, col, row, values) -> ttk.Combobox:
+        var = tk.StringVar(value="+")
+        combo = ttk.Combobox(parent, textvariable=var, values=values, width=3, state="readonly")
+        combo.grid(row=row, column=col, padx=2)
+        self.op_vars.append(var)
+        return combo
 
-        # Регулярка для проверки пробелов: группы по 3 цифры
-        # Разрешаем: "-1 000.00", "1000", "0.1"
-        # Запрещаем: "1  000", "1 23 5", "0.0-1"
-        clean_val = val.replace(" ", "")
-        
-        # Проверка структуры пробелов (если они есть)
-        if " " in val:
-            parts = val.split(".")
-            integer_part = parts[0].lstrip('-')
-            # Группы должны быть по 3 цифры, кроме первой
-            groups = integer_part.split(" ")
-            if any(len(g) != 3 for g in groups[1:]) or any(not g for g in groups):
-                raise ValueError("Некорректное расположение пробелов.")
+    def _validate_and_parse(self, val_str: str) -> Decimal:
+        """Парсинг числа с поддержкой формата из Шага 2."""
+        clean = val_str.strip().replace(",", ".").replace(" ", "")
+        if not clean: raise CalculatorError("Пустое поле ввода")
+        if "e" in clean.lower(): raise CalculatorError("Экспоненциальная форма запрещена")
+        return Decimal(clean)
 
+    def _on_params_change(self):
+        """Пересчитывает округление, если результат уже есть."""
+        raw_val = self.raw_result_var.get()
+        if raw_val != "-":
+            mode = RoundingMode(self.rounding_var.get())
+            self.rounded_result_var.set(self.engine.format_final(Decimal(raw_val), mode))
+
+    def _calculate(self):
         try:
-            # Decimal сам проверит на буквы и "0.0-1" после удаления пробелов
-            result = Decimal(clean_val)
+            nums = [self._validate_and_parse(e.get()) for e in self.num_entries]
+            ops = [v.get() for v in self.op_vars]
+            mode = RoundingMode(self.rounding_var.get())
+
+            state = CalculationState(nums=nums, ops=ops, rounding_mode=mode)
+            result = self.engine.evaluate(state)
+            
+            # Сохраняем точный результат (для отображения и последующего переокругления)
+            self.raw_result_var.set(f"{result:f}".rstrip('0').rstrip('.'))
+            self.rounded_result_var.set(self.engine.format_final(result, mode))
+
+        except CalculatorError as e:
+            messagebox.showwarning("Ошибка вычислений", str(e))
         except InvalidOperation:
-            raise ValueError(f"Некорректный формат числа: {raw_value}")
-
-        return result
-
-    def format_output(self, d: Decimal) -> str:
-        """Форматирует Decimal согласно строгим правилам Шага 2."""
-        # Квантование до 6 знаков (математическое округление)
-        d = d.quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP)
-        
-        # Разделяем целую и дробную части
-        sign = "-" if d < 0 else ""
-        abs_d = abs(d)
-        integer_part = int(abs_d)
-        # Получаем дробную часть как строку, убирая незначащие нули
-        fractional_part = str(abs_d % 1).lstrip('0') 
-        if fractional_part.startswith('.'):
-            fractional_part = fractional_part[1:]
-        
-        # Форматируем целую часть с пробелами
-        formatted_int = f"{integer_part:,}".replace(",", " ")
-        
-        if not fractional_part or fractional_part == "":
-            return f"{sign}{formatted_int}.0" # Минимум один ноль если пусто? 
-            # В условии: "Незначащие не отображать", но разделитель "всегда точка".
-        
-        # Отрезаем лишние нули справа в дробной части (на случай если Decimal .000100)
-        fractional_part = fractional_part.rstrip('0')
-        if not fractional_part:
-            return f"{sign}{formatted_int}.0"
-            
-        return f"{sign}{formatted_int}.{fractional_part}"
-
-    def calculate(self):
-        try:
-            n1 = self.validate_input(self.num1_entry.get())
-            n2 = self.validate_input(self.num2_entry.get())
-            op = self.operation_var.get()
-
-            if op == "add":
-                res = n1 + n2
-            elif op == "subtract":
-                res = n1 - n2
-            elif op == "multiply":
-                res = n1 * n2
-            elif op == "divide":
-                if n2 == 0:
-                    raise ZeroDivisionError("Деление на ноль невозможно.")
-                res = n1 / n2
-            
-            # Проверка диапазона
-            if abs(res) > self.LIMIT:
-                messagebox.showwarning("Переполнение", "Результат превышает 1 000 000 000 000")
-                return
-
-            self.result_var.set(f"Результат: {self.format_output(res)}")
-
-        except ZeroDivisionError as e:
-            messagebox.showerror("Ошибка", str(e))
-        except ValueError as e:
-            messagebox.showerror("Ошибка ввода", str(e))
+            messagebox.showerror("Ошибка", "Некорректный формат чисел")
         except Exception as e:
-            messagebox.showerror("Ошибка", f"Произошел сбой: {e}")
+            messagebox.showerror("Критический сбой", f"Произошло непредвиденное: {e}")
 
 if __name__ == "__main__":
     root = tk.Tk()
-    app = FinancialCalculator(root)
+    # Стилизация ttk для более строгого вида
+    style = ttk.Style()
+    style.theme_use('clam')
+    app = FinancialApp(root)
     root.mainloop()

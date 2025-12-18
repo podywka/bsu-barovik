@@ -82,13 +82,20 @@ class CalculatorEngine:
         """Округляет результат до целых согласно выбранному методу."""
         target = Decimal("1")
         if mode == RoundingMode.MATH:
-            return str(val.quantize(target, rounding=ROUND_HALF_UP))
+            rounded_val = val.quantize(target, rounding=ROUND_HALF_UP)
         elif mode == RoundingMode.BANKERS:
-            return str(val.quantize(target, rounding=ROUND_HALF_EVEN))
+            rounded_val = val.quantize(target, rounding=ROUND_HALF_EVEN)
         elif mode == RoundingMode.TRUNCATE:
             # Усечение: всегда к нулю
-            return str(val.quantize(target, rounding=ROUND_DOWN))
-        return str(val)
+            rounded_val = val.quantize(target, rounding=ROUND_DOWN)
+        else:
+            rounded_val = val
+        
+        # Нормализуем Decimal (убираем экспоненту, лишние нули)
+        # Это преобразует -0 в 0, -8.0 в -8
+        normalized = rounded_val.normalize()
+        
+        return str(normalized)
 
 class FinancialApp:
     """GUI приложения в строгом стиле."""
@@ -197,31 +204,40 @@ class FinancialApp:
         if not val_str:
             return Decimal("0")
         
-        # Убираем все пробелы (включая неразрывные)
+        # Убираем все пробелы
         clean = re.sub(r'\s+', '', val_str.strip())
         
         if not clean:
             raise CalculatorError("Пустое поле ввода")
         
-        # Проверяем, что строка похожа на число
-        if not re.match(r'^[-+]?\d*([.,]\d*)?$', clean):
-            raise CalculatorError(f"Некорректный формат числа: '{val_str}'")
+        # Удаляем запятые-разделители тысяч (американский формат)
+        # Но нужно быть осторожным: запятая может быть разделителем дробной части!
+        # Подсчитываем запятые и точки
+        comma_count = clean.count(',')
+        dot_count = clean.count('.')
         
-        # Заменяем запятую на точку
-        clean = clean.replace(',', '.')
+        if comma_count > 0 and dot_count > 0:
+            # Есть и запятые, и точки - вероятно американский формат
+            # Запятые - разделители тысяч, точка - разделитель дробной части
+            clean = clean.replace(',', '')  # Удаляем запятые-разделители
+        elif comma_count == 1 and dot_count == 0:
+            # Одна запятая, нет точек - европейский формат
+            clean = clean.replace(',', '.')  # Заменяем запятую на точку
+        elif comma_count > 1 and dot_count == 0:
+            # Несколько запятых, нет точек - американский формат без точки
+            clean = clean.replace(',', '')  # Удаляем запятые-разделители
+        
+        # Теперь проверяем формат
+        if not re.match(r'^[-+]?\d*([.]\d*)?$', clean):
+            raise CalculatorError(f"Некорректный формат числа: '{val_str}'")
         
         # Проверка на экспоненциальную форму
         if 'e' in clean.lower():
             raise CalculatorError("Экспоненциальная форма запрещена")
         
-        # Проверка на несколько разделителей
+        # Проверка на несколько точек (теперь их должно быть не больше 1)
         if clean.count('.') > 1:
             raise CalculatorError("Слишком много разделителей в числе")
-        
-        # Проверка на отрицательное число
-        if clean.startswith('-'):
-            # Допускаем отрицательные числа
-            pass
         
         try:
             return Decimal(clean)

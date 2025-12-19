@@ -37,7 +37,8 @@ def main():
         db_manager.close()
         
     except Exception as e:
-        print(f"Ошибка запуска приложения: {e.with_traceback()}")
+        import logging
+        logging.exception(f"Ошибка запуска приложения: {e}")
         sys.exit(1)
 
 if __name__ == "__main__":

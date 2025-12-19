@@ -5,6 +5,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 
+from lab2.database.seed_db import seed_initial_data
+
 class DatabaseManager:
     def __init__(self, db_path: Path):
         self.db_path = db_path
@@ -19,12 +21,44 @@ class DatabaseManager:
         # Включаем поддержку внешних ключей
         self.conn.execute("PRAGMA foreign_keys = ON")
         
-        # Создаем таблицы метаданных
-        self._create_metadata_tables()
+        # Загружаем полную схему из schema.sql
+        self._load_full_schema()
         
-        # Создаем или обновляем таблицы данных на основе метаданных
-        self._sync_data_tables()
-    
+        # Заполняем начальными данными
+        seed_initial_data(db_manager=self)
+
+    def _load_full_schema(self):
+        """Загружает полную схему из schema.sql"""
+        schema_path = Path(__file__).parent.parent / 'schema.sql'
+        
+        if not schema_path.exists():
+            print("⚠️  Файл schema.sql не найден")
+            return
+        
+        try:
+            with open(schema_path, 'r', encoding='utf-8') as f:
+                schema_sql = f.read()
+            
+            # Разбиваем SQL на отдельные команды и выполняем их по очереди
+            commands = schema_sql.split(';')
+            
+            for command in commands:
+                command = command.strip()
+                if command:  # Пропускаем пустые команды
+                    try:
+                        self.conn.execute(command)
+                    except sqlite3.OperationalError as e:
+                        # Игнорируем ошибки "таблица уже существует"
+                        if "already exists" not in str(e):
+                            print(f"⚠️  SQL ошибка: {e}")
+            
+            self.conn.commit()
+            print("✅ Схема базы данных загружена")
+            
+        except Exception as e:
+            print(f"❌ Ошибка загрузки схемы: {e}")
+            raise
+
     def _create_metadata_tables(self):
         """Создание таблиц метаданных"""
         with open(Path(__file__).parent.parent / 'schema.sql', 'r', encoding='utf-8') as f:
@@ -34,7 +68,7 @@ class DatabaseManager:
         metadata_sql = schema.split('-- Таблицы для данных')[0]
         self.conn.executescript(metadata_sql)
         self.conn.commit()
-    
+
     def _sync_data_tables(self):
         """Синхронизация таблиц данных с метаданными"""
         # Получаем все справочники

@@ -1,7 +1,7 @@
 # test_error_fixes.py
 import unittest
 from decimal import Decimal, getcontext, ROUND_HALF_UP, ROUND_HALF_EVEN, ROUND_DOWN
-from main import CalculatorEngine, CalculationState, RoundingMode, CalculatorError
+from lab1.main import CalculatorEngine, CalculationState, RoundingMode, CalculatorError
 import re
 
 getcontext().prec = 28
